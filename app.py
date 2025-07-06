@@ -1,102 +1,210 @@
 # -*- coding: utf-8 -*-
+"""
+결빙 교통사고 예측 Streamlit 앱
+"""
 import streamlit as st
 import pandas as pd
 import numpy as np
-import requests
+from sklearn.model_selection import train_test_split
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.metrics import mean_squared_error, r2_score
 import plotly.express as px
+import matplotlib.pyplot as plt
+import requests
+import urllib.parse
 
-st.set_page_config(page_title="🏠 주민대피시설 통계 대시보드", layout="wide")
+# 페이지 설정
+st.set_page_config(
+    page_title="결빙 교통사고 예측 대시보드",
+    page_icon="❄️",
+    layout="wide"
+)
 
-# 🔐 API 키 설정 (decoding 일반 인증키 사용)
-service_key = "여기에_복호화된_인증키를_입력하세요"
+# 캐시 데코레이터로 데이터 로딩 최적화
+@st.cache_data
+def load_and_process_data():
+    """데이터 로딩 및 전처리 함수"""
+    
+    # API 인증키
+    service_key_raw = "jUxxEMTFyxsIT2rt2P8JBO9y0EmFT9mx1zNPb31XLX27rFNH12NQ+6+ZLqqvW6k/ffQ5ZOOYzzcSo0Fq4u3Lfg=="
+    
+    # API 요청
+    url = "http://apis.data.go.kr/B552061/frequentzoneFreezing/getRestFrequentzoneFreezing"
+    params = {
+        "serviceKey": service_key_raw,
+        "searchYearCd": "2023",
+        "siDo": "",
+        "guGun": "",
+        "type": "json",
+        "numOfRows": "100",
+        "pageNo": "1"
+    }
+    
+    try:
+        response = requests.get(url, params=params, timeout=10)
+        
+        if response.status_code != 200:
+            st.error(f"API 요청 실패: 상태 코드 {response.status_code}")
+            return None, None, None, None, None
+            
+        data = response.json()
+        items = data.get("items", [])
+        
+        if not items:
+            st.error("API에서 데이터를 받아오지 못했습니다.")
+            return None, None, None, None, None
+            
+        df = pd.DataFrame(items)
+        
+        # 데이터 전처리
+        df_parsed = df['item']
+        df_norm = pd.DataFrame(df_parsed.tolist())
+        
+        # 시도명 추출
+        df_norm['시도명'] = df_norm['sido_sgg_nm'].str.extract(r'^(\S+)')
+        
+        # 위도/경도 변환
+        df_norm['위도'] = pd.to_numeric(df_norm['la_crd'], errors='coerce')
+        df_norm['경도'] = pd.to_numeric(df_norm['lo_crd'], errors='coerce')
+        
+        # 수치형 컬럼 변환
+        numeric_cols = ['occrrnc_cnt', 'caslt_cnt', 'dth_dnv_cnt', 'se_dnv_cnt', 'sl_dnv_cnt', 'wnd_dnv_cnt']
+        df_norm[numeric_cols] = df_norm[numeric_cols].apply(pd.to_numeric, errors='coerce')
+        
+        # 결측치 제거
+        df_norm.dropna(subset=['위도', '경도', 'occrrnc_cnt'], inplace=True)
+        
+        if len(df_norm) == 0:
+            st.error("전처리 후 사용할 수 있는 데이터가 없습니다.")
+            return None, None, None, None, None
+        
+        return df_norm, True, None, None, None
+        
+    except Exception as e:
+        st.error(f"데이터 로딩 중 오류 발생: {str(e)}")
+        return None, None, None, None, None
 
 @st.cache_data
-def load_shelter_data(year="2019"):
-    """주민대피시설 통계 API 데이터 로드"""
-    url = "http://apis.data.go.kr/1741000/ShelterInfoOpenApi/getShelterInfo"
-    params = {
-        "serviceKey": service_key,
-        "pageNo": 1,
-        "numOfRows": 500,
-        "type": "json",
-        "bas_yy": year,
-    }
-    response = requests.get(url, params=params)
-    if response.status_code != 200:
-        st.error(f"API 요청 실패: {response.status_code}")
-        return None
+def train_model(df_norm):
+    """모델 학습 함수"""
+    
+    # 원-핫 인코딩
+    df_encoded = pd.get_dummies(df_norm, columns=['시도명'], drop_first=True)
+    
+    # 피처와 타겟 분리
+    features = ['caslt_cnt', 'dth_dnv_cnt', 'se_dnv_cnt', 'sl_dnv_cnt', 'wnd_dnv_cnt', '위도', '경도']
+    features += [col for col in df_encoded.columns if col.startswith('시도명_')]
+    
+    X = df_encoded[features]
+    y = df_encoded['occrrnc_cnt']
+    
+    # 학습/테스트 분할
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.2, random_state=42
+    )
+    
+    # 모델 학습
+    model = RandomForestRegressor(n_estimators=100, random_state=42)
+    model.fit(X_train, y_train)
+    
+    # 예측 및 평가
+    y_pred = model.predict(X_test)
+    rmse = np.sqrt(mean_squared_error(y_test, y_pred))
+    r2 = r2_score(y_test, y_pred)
+    
+    # 결과 데이터 준비
+    X_test_result = X_test.copy()
+    X_test_result['예측사고건수'] = y_pred
+    X_test_result['위도'] = df_encoded.loc[X_test_result.index, '위도']
+    X_test_result['경도'] = df_encoded.loc[X_test_result.index, '경도']
+    
+    return model, X_test_result, rmse, r2, X.columns
 
-    data = response.json()
-    items = data.get("response", {}).get("body", {}).get("items", [])
-    df = pd.DataFrame(items)
+def main():
+    """메인 함수"""
+    
+    # 제목
+    st.title("❄️ 결빙 교통사고 예측 대시보드")
+    st.markdown("2023년 결빙 교통사고 다발지역을 머신러닝으로 예측하여 시각화한 결과입니다.")
+    
+    # 데이터 로딩
+    with st.spinner("데이터를 불러오는 중..."):
+        df_norm, success, _, _, _ = load_and_process_data()
+    
+    if df_norm is None:
+        st.stop()
+    
+    # 모델 학습
+    with st.spinner("머신러닝 모델을 학습하는 중..."):
+        model, X_test_result, rmse, r2, feature_names = train_model(df_norm)
+    
+    # 성능 지표 표시
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("데이터 건수", len(df_norm))
+    with col2:
+        st.metric("RMSE", f"{rmse:.2f}")
+    with col3:
+        st.metric("R² Score", f"{r2:.3f}")
+    
+    # 지도 시각화
+    st.subheader("📌 예측 사고지도")
+    
+    if len(X_test_result) > 0:
+        fig = px.scatter_mapbox(
+            X_test_result,
+            lat="위도",
+            lon="경도",
+            size="예측사고건수",
+            color="예측사고건수",
+            hover_data=["예측사고건수"],
+            zoom=6,
+            size_max=30,
+            title="예측된 사고 위험 지역 (버블 크기 = 예측 사고 건수)"
+        )
+        
+        fig.update_layout(
+            mapbox_style="carto-positron",
+            margin={"r":0,"t":40,"l":0,"b":0},
+            height=500
+        )
+        
+        st.plotly_chart(fig, use_container_width=True)
+        
+        # 위험지역 Top 10
+        st.subheader("🔥 위험지역 Top 10")
+        top_n = X_test_result.nlargest(10, '예측사고건수')
+        st.dataframe(top_n[['위도', '경도', '예측사고건수']], use_container_width=True)
+        
+        # 피처 중요도
+        st.subheader("📊 중요 변수 분석")
+        importances = pd.Series(model.feature_importances_, index=feature_names)
+        top_features = importances.nlargest(10)
+        
+        fig_importance = px.bar(
+            x=top_features.values,
+            y=top_features.index,
+            orientation='h',
+            title="사고 발생에 영향을 미친 중요 변수 Top 10"
+        )
+        fig_importance.update_layout(
+            xaxis_title="중요도",
+            yaxis_title="변수",
+            height=400
+        )
+        st.plotly_chart(fig_importance, use_container_width=True)
+    
+    else:
+        st.warning("테스트 데이터가 충분하지 않습니다.")
+    
+    # 인사이트
+    st.subheader("📍 인사이트 요약")
+    st.markdown("""
+    - **예측 사고지도**를 통해 향후 사고 다발 가능성이 높은 지역을 선제적으로 파악할 수 있습니다.
+    - **Top 10 위험지역**을 기반으로 제설작업, 경고판 설치, 감시카메라 배치 등을 우선 적용할 수 있습니다.
+    - 사고건수는 사망자·부상자수, 위경도 등의 복합 요인에 영향을 받으므로 지역 맞춤형 정책이 필요합니다.
+    - **실시간 지도 시각화**는 정책입안자 및 현장 관리자에게 직관적인 의사결정 근거를 제공합니다.
+    """)
 
-    # 정제
-    df["accept_rt"] = pd.to_numeric(df["accept_rt"].str.replace(",", ""), errors="coerce")  # 수용률
-    df["target_popl"] = pd.to_numeric(df["target_popl"].str.replace(",", ""), errors="coerce")  # 대상인구
-    df["shelt_abl_popl_smry"] = pd.to_numeric(df["shelt_abl_popl_smry"].str.replace(",", ""), errors="coerce")  # 수용 가능 인구
-    df["lat"] = pd.to_numeric(df["lat"], errors="coerce")
-    df["lon"] = pd.to_numeric(df["lon"], errors="coerce")
-
-    df.dropna(subset=["lat", "lon", "accept_rt"], inplace=True)
-    return df
-
-# 🎯 데이터 불러오기
-st.title("🏠 주민대피시설 통계 대시보드")
-with st.spinner("대피시설 통계 데이터를 불러오는 중입니다..."):
-    shelter_df = load_shelter_data()
-
-if shelter_df is None:
-    st.stop()
-
-# 📊 요약 지표
-st.subheader("📌 전국 통계 요약")
-col1, col2, col3 = st.columns(3)
-col1.metric("📍 총 대피시설 수", len(shelter_df))
-col2.metric("👥 대상 인구 총합", f"{int(shelter_df['target_popl'].sum()):,} 명")
-col3.metric("📈 평균 수용률", f"{shelter_df['accept_rt'].mean():.2f}%")
-
-# 📍 지역 필터
-st.sidebar.header("🎛️ 필터")
-sido_list = shelter_df["regi"].dropna().unique()
-selected_region = st.sidebar.selectbox("시도 선택", ["전체"] + list(sorted(sido_list)))
-if selected_region != "전체":
-    shelter_df = shelter_df[shelter_df["regi"] == selected_region]
-
-min_rt, max_rt = st.sidebar.slider("수용률 범위 (%)", 0.0, 500.0, (0.0, 500.0))
-shelter_df = shelter_df[(shelter_df["accept_rt"] >= min_rt) & (shelter_df["accept_rt"] <= max_rt)]
-
-# 🗺️ 대피시설 지도 시각화
-st.subheader("📍 대피시설 분포 지도")
-map_color = shelter_df["accept_rt"].apply(lambda x: "red" if x < 100 else "yellow" if x < 300 else "green")
-
-fig = px.scatter_mapbox(
-    shelter_df,
-    lat="lat",
-    lon="lon",
-    color=map_color,
-    hover_data=["regi", "target_popl", "accept_rt", "shelt_abl_popl_smry"],
-    zoom=5,
-    size_max=15,
-)
-fig.update_layout(mapbox_style="carto-positron", height=500, margin={"r":0, "t":0, "l":0, "b":0})
-st.plotly_chart(fig, use_container_width=True)
-
-# 🔥 수용률 낮은 지역 Top 10
-st.subheader("🔥 인구 대비 수용률 낮은 지역 Top 10")
-top10 = shelter_df.sort_values(by="accept_rt").head(10)
-st.dataframe(top10[["regi", "target_popl", "shelt_abl_popl_smry", "accept_rt"]])
-
-# 📊 수용률 히트맵
-st.subheader("🌡️ 시도별 수용률 히트맵")
-pivot = shelter_df.groupby("regi")["accept_rt"].mean().reset_index()
-fig2 = px.density_heatmap(pivot, x="regi", y="accept_rt", color_continuous_scale="RdYlGn", height=300)
-st.plotly_chart(fig2, use_container_width=True)
-
-# ℹ️ 비상 정보
-st.subheader("ℹ️ 실용 정보")
-st.markdown("""
-- **내 지역 대피시설 찾기**: 지도에서 위치 확인 가능
-- **가장 가까운 대피소 거리 계산**: 향후 업데이트 예정
-- **비상연락처**: [행정안전부 재난안전포털](https://www.safekorea.go.kr)
-- **대피요령 안내**: 지진, 화재, 풍수해 등 상황별 대피 행동요령은 [여기](https://www.safekorea.go.kr/idsiSFK/neo/main/main.html) 참고
-""")
+if __name__ == "__main__":
+    main()
