@@ -26,8 +26,8 @@ def load_and_process_data():
     """데이터 로딩 및 전처리 함수"""
     
     # API 인증키
-    service_key_raw = "xHdZnEfS8XNovgc69B/bQIwtLas/+h2gvgmHWbC9auMwvqT1KCMZ8VwrYBiJa+jskRMBN7pI8AMoAQ7zRY1vfg=="
-    
+    service_key_raw = "jUxxEMTFyxsIT2rt2P8JBO9y0EmFT9mx1zNPb31XLX27rFNH12NQ%2B6%2BZLqqvW6k%2FffQ5ZOOYzzcSo0Fq4u3Lfg%3D%3D"
+    #service_key_raw = "xHdZnEfS8XNovgc69B/bQIwtLas/+h2gvgmHWbC9auMwvqT1KCMZ8VwrYBiJa+jskRMBN7pI8AMoAQ7zRY1vfg=="    
     # API 요청
     url = "http://apis.data.go.kr/B552061/frequentzoneFreezing/getRestFrequentzoneFreezing"
     params = {
